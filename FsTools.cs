@@ -35,7 +35,7 @@ internal static class FsTools
         var rootWithSep = Root.EndsWith(Path.DirectorySeparatorChar) ? Root : Root + Path.DirectorySeparatorChar;
         if (!full.Equals(Root, PathCmp) && !full.StartsWith(rootWithSep, PathCmp))
             throw new McpException($"path escapes root: {relativePath}");
-        FileSystemInfo? info =
+        FileSystemInfo info =
             Directory.Exists(full) ? new DirectoryInfo(full) :
             File.Exists(full) ? new FileInfo(full) : null;
         var linkTarget = info?.ResolveLinkTarget(true)?.FullName;
@@ -45,12 +45,7 @@ internal static class FsTools
         return full;
     }
 
-    // Keep the code workspace coherent with FS mutations. Directory ops reset wholesale.
-    static void Sync(string rel, bool isDir = false)
-    {
-        if (isDir) { Workspace.Reset(); return; }
-        if (rel.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)) Workspace.InvalidateFromDisk(rel);
-    }
+    static void Sync(string rel, bool isDir = false) { }
 
     internal static void AtomicWrite(string full, string content)
     {
@@ -118,7 +113,8 @@ internal static class FsTools
 
     // ── inspect ──
 
-    [McpServerTool, System.ComponentModel.Description(
+    [McpServerTool(Name = "file_info", Title = "Check Path", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false),
+     System.ComponentModel.Description(
         "Check whether a path exists and what it is, before Read/Write/Delete. " +
         "Returns exists:false rather than throwing if absent.")]
     public static string Stat(string relativePath) => Guarded(() =>
@@ -131,8 +127,11 @@ internal static class FsTools
             var fi = new FileInfo(full);
             return Ser(new
             {
-                exists = true, isDir = false, isFile = true,
-                bytes = fi.Length, modifiedUtc = fi.LastWriteTimeUtc,
+                exists = true,
+                isDir = false,
+                isFile = true,
+                bytes = fi.Length,
+                modifiedUtc = fi.LastWriteTimeUtc,
                 binary = LooksBinary(full),
                 readableWithoutTruncation = fi.Length <= MaxReadBytes
             });
@@ -140,9 +139,10 @@ internal static class FsTools
         return Ser(new { exists = false });
     });
 
-    [McpServerTool, System.ComponentModel.Description(
-        "List files and directories under a relative path (non-recursive). " +
-        "Errors if missing or not a directory — Stat first if unsure.")]
+    [McpServerTool(Name = "directory_list_files", Title = "List Directory", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false),
+    System.ComponentModel.Description(
+       "List files and directories under a relative path (non-recursive). " +
+       "Errors if missing or not a directory — Stat first if unsure.")]
     public static string List(string relativePath = ".") => Guarded(() =>
     {
         var full = Resolve(relativePath);
@@ -154,10 +154,11 @@ internal static class FsTools
         return Ser(new { path = relativePath, entries });
     });
 
-    [McpServerTool, System.ComponentModel.Description(
-        "Recursively list files, optionally filtered by extension; returns maxTreeEntries per call, " +
-        "hasMore:true with nextOffset for paging.")]
-    public static string Tree(string relativePath = ".", string? extension = null, int offset = 0) => Guarded(() =>
+    [McpServerTool(Name = "directory_list_recursive", Title = "List Directory Tree", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false),
+    System.ComponentModel.Description(
+       "Recursively list files, optionally filtered by extension; returns maxTreeEntries per call, " +
+       "hasMore:true with nextOffset for paging.")]
+    public static string Tree(string relativePath = ".", string extension = null, int offset = 0) => Guarded(() =>
     {
         if (offset < 0) throw new McpException("offset must be >= 0");
         var full = Resolve(relativePath);
@@ -172,13 +173,20 @@ internal static class FsTools
             .ToArray();
         var hasMore = page.Length > MaxTreeEntries;
         var files = hasMore ? page[..MaxTreeEntries] : page;
-        return Ser(new { count = files.Length, files, offset, hasMore,
-                         nextOffset = hasMore ? offset + files.Length : -1 });
+        return Ser(new
+        {
+            count = files.Length,
+            files,
+            offset,
+            hasMore,
+            nextOffset = hasMore ? offset + files.Length : -1
+        });
     });
 
     // ── read ──
 
-    [McpServerTool, System.ComponentModel.Description(
+    [McpServerTool(Name = "file_read", Title = "Read File", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false),
+     System.ComponentModel.Description(
         "Read a whole file as UTF-8 text. Refuses binary (NUL bytes) and files over maxReadBytes — " +
         "Stat.readableWithoutTruncation predicts which; use ReadRange to page larger files.")]
     public static string Read(string relativePath) => Guarded(() =>
@@ -191,9 +199,10 @@ internal static class FsTools
         return Ser(new { content = r.ReadToEnd(), totalBytes = s.Length });
     });
 
-    [McpServerTool, System.ComponentModel.Description(
-        "Read a byte range of a UTF-8 file (length -1 = one max-size chunk from offset). Page by " +
-        "resuming at offset+returnedBytes until truncated:false. Refuses binary; errs offset>size.")]
+    [McpServerTool(Name = "file_range_read", Title = "Read File Range", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false),
+   System.ComponentModel.Description(
+      "Read a byte range of a UTF-8 file (length -1 = one max-size chunk from offset). Page by " +
+      "resuming at offset+returnedBytes until truncated:false. Refuses binary; errs offset>size.")]
     public static string ReadRange(string relativePath, long offset = 0, long length = -1) => Guarded(() =>
     {
         var full = Resolve(relativePath);
@@ -209,15 +218,19 @@ internal static class FsTools
         {
             content = System.Text.Encoding.UTF8.GetString(buf, 0, n),
             truncated = offset + n < total,
-            totalBytes = total, offset, returnedBytes = n
+            totalBytes = total,
+            offset,
+            returnedBytes = n
         });
     });
 
     // ── write ──
 
-    [McpServerTool, System.ComponentModel.Description(
-        "Create a file with the given UTF-8 text, creating parent directories. Refuses existing " +
-        "files, reporting their size — use Append/Patch/Insert to modify, MoveReplace to clobber.")]
+    [McpServerTool(Name = "file_create", Title = "Create New File", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false),
+     System.ComponentModel.Description(
+        "CREATE a NEW file only — refuses to run if the file already exists (reports current size in " +
+        "the error) and creates parent directories as needed. Write never clobbers, by design. " +
+        "To modify an EXISTING file instead: Append, Patch, Insert, or MoveReplace.")]
     public static string Write(string relativePath, string content) => Guarded(() =>
     {
         var full = Resolve(relativePath);
@@ -236,8 +249,11 @@ internal static class FsTools
         return Ser(new { written = relativePath, bytes = System.Text.Encoding.UTF8.GetByteCount(content) });
     });
 
-    [McpServerTool, System.ComponentModel.Description(
-        "Append text to an existing file. Write creates.")]
+    [McpServerTool(Name = "file_append", Title = "Append to File", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false),
+     System.ComponentModel.Description(
+        "ADD text to the END of an EXISTING file only — errors if the file doesn't exist yet (use " +
+        "Write to create it first). Nothing before the existing content is touched. NOT the right " +
+        "tool for changing the middle of a file — use Patch or Insert for that instead.")]
     public static string Append(string relativePath, string content) => Guarded(() =>
     {
         var full = Resolve(relativePath);
@@ -251,9 +267,11 @@ internal static class FsTools
         return Ser(new { written = relativePath, bytes = bytes.Length });
     });
 
-    [McpServerTool, System.ComponentModel.Description(
-        "Overwrite bytes in place from a byte offset (Read-compatible). Old tail past the written " +
-        "region survives — Truncate to cut it. Errs: offset>size, mid-UTF-8.")]
+    [McpServerTool(Name = "file_replace_at", Title = "Patch File Bytes", ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false),
+    System.ComponentModel.Description(
+       "OVERWRITE bytes starting at a byte offset, REPLACING content there in place — content after " +
+       "the patched region survives unless you also call Truncate. Use Insert instead if you want " +
+       "to splice in content without overwriting anything. Errors: offset>size, mid-UTF-8.")]
     public static string Patch(string relativePath, string content, long offset) => Guarded(() =>
     {
         var full = Resolve(relativePath);
@@ -270,9 +288,11 @@ internal static class FsTools
         return Ser(new { written = relativePath, offset, bytes = bytes.Length, totalBytes = total });
     });
 
-    [McpServerTool, System.ComponentModel.Description(
-        "Set end-of-file at a byte offset, discarding everything after — the 'last chunk written, " +
-        "file ends here' step of a piecewise rewrite. Errs: length>size, mid-UTF-8.")]
+    [McpServerTool(Name = "file_truncate", Title = "Truncate File", ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false),
+     System.ComponentModel.Description(
+        "Cut a file down to a byte length, discarding everything after — the 'set new end of file' " +
+        "step of a manual rewrite. Writes nothing itself, only removes content past the given length. " +
+        "Errors: length>size, mid-UTF-8.")]
     public static string Truncate(string relativePath, long length) => Guarded(() =>
     {
         var full = Resolve(relativePath);
@@ -287,9 +307,11 @@ internal static class FsTools
         return Ser(new { truncated = relativePath, totalBytes = length, bytesRemoved = removed });
     });
 
-    [McpServerTool, System.ComponentModel.Description(
-        "Insert text at a byte offset (Read-compatible), shifting the rest. Atomic via temp file. " +
-        "Errs: offset>size, mid-UTF-8.")]
+    [McpServerTool(Name = "file_insert", Title = "Insert Text into File", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false),
+    System.ComponentModel.Description(
+       "SPLICE text IN at a byte offset, SHIFTING everything after it to make room — nothing existing " +
+       "is overwritten, the file grows. Use Patch instead if you want to REPLACE content at an offset " +
+       "rather than push it aside. Atomic via temp file. Errors: offset>size, mid-UTF-8.")]
     public static string Insert(string relativePath, string content, long offset) => Guarded(() =>
     {
         var full = Resolve(relativePath);
@@ -335,9 +357,11 @@ internal static class FsTools
             throw new McpException(".trash is managed storage; use Restore instead");
     }
 
-    [McpServerTool, System.ComponentModel.Description(
-        "Recoverably delete a file or directory into .trash/, recording its original path. " +
-        "Undo with Restore(trashId).")]
+    [McpServerTool(Name = "file_trash", Title = "Trash (Recoverable Delete)", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false),
+    System.ComponentModel.Description(
+       "RECOVERABLY delete a file or directory — moves it into .trash/, recording its original path " +
+       "so Restore(trashId) can undo it. This is the DEFAULT delete tool — prefer this over " +
+       "DeletePermanent unless you specifically need the space reclaimed right now.")]
     public static string Trash(string relativePath) => Guarded(() =>
     {
         var (full, isDir) = ResolveExisting(relativePath);
@@ -353,8 +377,10 @@ internal static class FsTools
         return Ser(new { deleted = relativePath, trashId, undo = $"Restore(\"{trashId}\")" });
     });
 
-    [McpServerTool, System.ComponentModel.Description(
-        "Irreversibly delete a file or directory (recursive). No trash, no undo — prefer Trash.")]
+    [McpServerTool(Name = "file_delete", Title = "Permanently Delete", ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false),
+    System.ComponentModel.Description(
+       "IRREVERSIBLY delete a file or directory (recursive) — no trash, no undo, cannot be recovered. " +
+       "Use Trash instead unless you specifically need this to be permanent right now.")]
     public static string DeletePermanent(string relativePath) => Guarded(() =>
     {
         var (full, isDir) = ResolveExisting(relativePath);
@@ -364,7 +390,7 @@ internal static class FsTools
         return Ser(new { deleted = relativePath, permanent = true });
     });
 
-    static string RestoreCore(string trashId, string? destRelOverride)
+    static string RestoreCore(string trashId, string destRelOverride)
     {
         if (trashId != Path.GetFileName(trashId) || trashId.Contains(".."))
             throw new McpException("trashId must be a bare id from Trash's result");
@@ -387,13 +413,15 @@ internal static class FsTools
         return Ser(new { restored = destRel, wasTrashId = trashId });
     }
 
-    [McpServerTool, System.ComponentModel.Description(
-        "Undo a Trash: restore the entry to its recorded original path. Fails if that path exists — " +
-        "use RestoreTo for a different destination.")]
+    [McpServerTool(Name = "file_trash_restore", Title = "Restore from Trash", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false),
+   System.ComponentModel.Description(
+      "Undo a Trash: restore the entry to its recorded original path. Fails if that path exists — " +
+      "use RestoreTo for a different destination.")]
     public static string Restore(string trashId) => Guarded(() => RestoreCore(trashId, null));
 
-    [McpServerTool, System.ComponentModel.Description(
-        "Restore a trash entry to an explicit path instead of its original. Fails if it exists.")]
+    [McpServerTool(Name = "file_trash_restore_to", Title = "Restore from Trash to Path", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false),
+    System.ComponentModel.Description(
+       "Restore a trash entry to an explicit path instead of its original. Fails if it exists.")]
     public static string RestoreTo(string trashId, string destinationRelativePath) =>
         Guarded(() => RestoreCore(trashId, destinationRelativePath));
 
@@ -411,13 +439,16 @@ internal static class FsTools
         return Ser(new { from = fromRel, to = toRel });
     }
 
-    [McpServerTool, System.ComponentModel.Description(
-        "Move or rename a file within root. Fails if the destination exists — use MoveReplace.")]
+    [McpServerTool(Name = "file_move", Title = "Move/Rename File", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false),
+    System.ComponentModel.Description(
+       "Move or rename a file within root. Fails if the destination exists — use MoveReplace.")]
     public static string Move(string fromRelativePath, string toRelativePath) =>
         Guarded(() => MoveCore(fromRelativePath, toRelativePath, false));
 
-    [McpServerTool, System.ComponentModel.Description(
-        "Move or rename a file within root, replacing the destination if it exists.")]
+    [McpServerTool(Name = "file_move_replace", Title = "Move/Rename File (Replace)", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false),
+     System.ComponentModel.Description(
+        "Move or rename a file within root, REPLACING the destination if it already exists. " +
+        "Use Move instead if you want it to fail on a collision rather than clobber.")]
     public static string MoveReplace(string fromRelativePath, string toRelativePath) =>
         Guarded(() => MoveCore(fromRelativePath, toRelativePath, true));
 }
